@@ -1,134 +1,84 @@
-🤖 Website-ChatBot: Chat with Any Website
-An intelligent chatbot that can read the content of any live website and answer your questions about it. Simply provide a URL, and start a conversation with the website's knowledge base, powered by Google's Gemini AI.
+# 🤖 Website-ChatBot: AI Knowledge Base Builder
 
-📍 Table of Contents
+Turn any webpage into a queryable, AI-powered knowledge base. Scrape once, ask forever — powered by Google's Gemini AI, LangChain, and FAISS vector search.
 
-Core Features
+---
 
-How It Works
+## 📚 Table of Contents
 
-Tech Stack
+- [Features](#features)
+- [Architecture](#architecture)
+- [Tech Stack](#tech-stack)
+- [Getting Started](#getting-started)
+- [Folder Structure](#folder-structure)
+- [Future Enhancements](#future-enhancements)
+- [License](#license)
 
-Setup and Installation
+---
 
-Future Enhancements
+## ✨ Features
 
-✨ Core Features
+- **One-Time Scraping, Persistent Memory**  
+  Website is scraped and indexed once, with future questions answered instantly using the stored vector knowledge.
 
-Dynamic Web Scraping: Utilizes Puppeteer to control a headless browser, ensuring it can scrape content from modern, JavaScript-heavy websites, not just static HTML.
+- **Semantic Understanding via Embeddings**  
+  Uses Google’s embedding models for deep conceptual understanding, not just keyword matching.
 
-Intelligent Content Extraction: The scraper is smart! It first tries to identify and extract text from the main content area (<main>, <article>) of a page, ignoring irrelevant menus, ads, and footers.
+- **FAISS-Powered Semantic Search**  
+  Fast and accurate similarity search on content vectors using FAISS.
 
-AI-Powered Q&A: Leverages the Google Gemini AI model to understand user questions and provide accurate answers based only on the scraped website content.
+- **Intelligent Puppeteer Scraper**  
+  Handles JavaScript-heavy sites, accepts cookie banners, and extracts relevant content from semantic HTML tags.
 
-Robust Error Handling: Includes mechanisms to handle API rate limits, server overloads, and scraping timeouts gracefully.
+- **LLM-Powered Answering**  
+  Gemini AI provides natural and context-aware responses based on the retrieved knowledge.
 
-Sleek, Responsive UI: A clean and modern chat interface built with React and styled with Tailwind CSS.
+- **Robust API Backend**  
+  Clean Express server with modular routes, error handling, and job management.
 
-⚙️ How It Works
+---
 
-The application is a full-stack project with a clear separation between the frontend and backend.
+## ⚙️ Architecture
 
-Frontend (React): The user enters a URL into the React UI.
+### 🧠 Index-Then-Ask Pipeline
 
-API Call: The frontend sends the URL to the backend's /scrape endpoint.
+#### 1. Indexing (`/index-website`)
 
-Backend (Node.js/Express):
+- **Scrape:** Puppeteer visits the site and extracts readable content.
+- **Chunk:** LangChain splits content into overlapping text chunks.
+- **Embed:** GoogleGenerativeAIEmbeddings converts chunks to vectors.
+- **Store:** Chunks + vectors saved into FAISS vector store.
 
-The server receives the URL.
+#### 2. Querying (`/ask-indexed`)
 
-Puppeteer launches a headless browser, navigates to the URL, and intelligently scrapes the main text content.
+- **Load Store:** FAISS vector store loaded for the requested URL.
+- **Embed Question:** User query converted to vector.
+- **Search:** FAISS finds similar chunks.
+- **Answer:** Gemini LLM generates answer based on matched chunks.
 
-The scraped text is sent back to the frontend.
+---
 
-User Asks a Question: The user types a question into the chat.
+## 🛠️ Tech Stack
 
-AI Query: The frontend sends the question and the stored website text to the backend's /ask endpoint.
+### Backend & AI
 
-Gemini AI: The backend formats a prompt and queries the Google Gemini API, which generates a context-aware answer.
+- **Node.js** + **Express**
+- **Puppeteer** – Headless web scraping
+- **LangChain** – Text splitting and orchestration
+- **FAISS** – Local vector similarity search
+- **Google Gemini AI** – Embeddings and natural language responses
 
-Response: The final answer is sent back to the frontend and displayed in the chat.
+### Frontend
 
-🛠️ Tech Stack
+- **React** – UI Framework
+- **Tailwind CSS** – Styling
+- **Vite** – Dev server & bundler
 
-Frontend:
+---
 
-React: For building the user interface.
+## 🚀 Getting Started
 
-Tailwind CSS: For utility-first styling.
+### Prerequisites
 
-Backend:
-
-Node.js: As the JavaScript runtime environment.
-
-Express.js: As the web server framework.
-
-Puppeteer: For powerful, headless web scraping.
-
-@google/generative-ai: The official Google AI SDK for JavaScript to interact with the Gemini API.
-
-🚀 Setup and Installation
-
-To run this project locally, follow these steps:
-
-Prerequisites:
-
-Node.js and npm installed.
-
-A Google AI API Key.
-
-1. Clone the Repository:
-
-git clone [https://github.com/your-username/website-chatbot.git](https://github.com/your-username/website-chatbot.git)
-cd website-chatbot
-
-2. Set Up the Backend:
-
-# Navigate to the server directory
-cd server
-
-# Install backend dependencies
-npm install
-
-# Create a .env file and add your API key
-# (Or you can paste it directly into server.js)
-# YOUR_API_KEY="AIzaSy..." 
-
-3. Set Up the Frontend:
-
-# Navigate back to the root directory and then to the frontend
-cd .. 
-
-# Install frontend dependencies
-npm install
-
-4. Run the Application:
-You'll need two separate terminals to run both the frontend and backend servers.
-
-In Terminal 1 (for the backend):
-
-cd server
-node server.js
-# Server will be running on http://localhost:8000
-
-In Terminal 2 (for the frontend):
-
-# (from the root directory)
-npm run dev
-# Frontend will be running on http://localhost:5173 (or similar)
-
-Open your browser and navigate to the frontend URL to start using the chatbot!
-
-🔮 Future Enhancements
-
-This project has a strong foundation that can be extended with even more powerful features:
-
-Vector Embeddings: The next logical step is to implement a vector database (like ChromaDB or Pinecone). This would involve:
-
-Scraping and chunking the entire website content once.
-
-Generating embeddings for each chunk.
-
-Performing a semantic search on user questions to find the most relevant context.
-This would make the chatbot faster, more accurate, and capable of handling entire websites instead of just single pages.
-
+- Node.js and npm installed
+- A Google AI API Key ([get it here](https://makersuite.google.com/app/apikey))
