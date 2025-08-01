@@ -1,6 +1,5 @@
 import React, { useState, useRef, useEffect } from "react";
 
-
 // This is a reusable template. It doesn't draw a specific shape on its own
 const Icon = ({ path, className = "w-6 h-6" }) => (
   <svg
@@ -11,7 +10,8 @@ const Icon = ({ path, className = "w-6 h-6" }) => (
     stroke="currentColor"
     className={className}
   >
-    <path strokeLinecap="round" strokeLinejoin="round" d={path} />
+    {" "}
+    <path strokeLinecap="round" strokeLinejoin="round" d={path} />{" "}
   </svg>
 );
 
@@ -34,31 +34,34 @@ const SendIcon = () => (
 // This is the avatar for the chatbot. It appears next to every message that the bot sends.
 const BotIcon = () => (
   <div className="w-8 h-8 bg-indigo-600 rounded-full flex items-center justify-center text-white font-bold flex-shrink-0">
+    {" "}
     <Icon
       path="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09zM18.25 12L17 14.188l-1.25-2.188a2.25 2.25 0 00-1.7-1.7L12 9.25l2.188-1.25a2.25 2.25 0 001.7-1.7L17 4.063l1.25 2.187a2.25 2.25 0 001.7 1.7L22.75 9l-2.187 1.25a2.25 2.25 0 00-1.7 1.7z"
       className="w-5 h-5"
-    />
+    />{" "}
   </div>
 );
 
 //  This is the avatar for you, the user. It appears next to every message that you send.
 const UserIcon = () => (
   <div className="w-8 h-8 bg-gray-600 rounded-full flex items-center justify-center text-white font-bold flex-shrink-0">
+    {" "}
     <Icon
       path="M15.75 6a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.501 20.118a7.5 7.5 0 0114.998 0A17.933 17.933 0 0112 21.75c-2.676 0-5.216-.584-7.499-1.632z"
       className="w-5 h-5"
-    />
+    />{" "}
   </div>
 );
 
 // --- Main App Component ---
-
 export default function App() {
   const [url, setUrl] = useState(""); // Remembers the text user enters
   const [isUrlSet, setIsUrlSet] = useState(false); // boolean switch for selecting to switch between "enter URl screen" and "Chat Screen"
   const [isLoading, setIsLoading] = useState(false); //  It remembers if the app is busy waiting for a response
   const [messages, setMessages] = useState([]); //  A list (an array) that remembers every message in the conversation
   const [currentQuery, setCurrentQuery] = useState(""); // Remembers the text the user types into the question box at the bottom
+  const [error, setError] = useState(""); // This was added to remember any error messages
+  const [scrapedText, setScrapedText] = useState(""); // This was added to store the large block of text that our backend sends back after it finishes scraping a website
 
   const chatEndRef = useRef(null);
 
@@ -68,43 +71,60 @@ export default function App() {
   }, [messages]);
 
   // This runs when you click "Start Chat"
-  const handleSetUrl = () => {
+  const handleSetUrl = async () => {
     if (url.trim() === "") {
-      alert("Please enter a valid URL.");
+      setError("Please enter a valid URL.");
       return;
     }
     setIsLoading(true);
-    // In a real app, you would send the URL to the backend scraper here.
-    // We'll simulate a delay for demonstration.
-    setTimeout(() => {
+    setError("");
+
+    // This try block uses the command to make a real network request to your backend server
+    try {
+      const response = await fetch("http://localhost:8000/scrape", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: url }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Scraping failed with status: ${response.status}`);
+      }
+
+      const data = await response.json();
+
+      setScrapedText(data.text);
       setIsUrlSet(true);
-      setIsLoading(false);
       setMessages([
         {
           sender: "bot",
           text: `Great! I've processed the content from "${url}". What would you like to know?`,
         },
       ]);
-    }, 2000);
+    } catch (err) {
+      console.error(err);
+      setError(
+        "Failed to scrape the website. Please check the URL or try another one."
+      );
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   //  This runs when you click the Send icon
-
   const handleSendMessage = () => {
     if (currentQuery.trim() === "" || isLoading) return;
-
     const newMessages = [...messages, { sender: "user", text: currentQuery }];
     setMessages(newMessages);
+    const userQuery = currentQuery;
     setCurrentQuery("");
     setIsLoading(true);
 
-    // Simulate backend call for Q&A
     setTimeout(() => {
-      // This is where you would get the real answer from the Gemini API
-      const botResponse = `This is a simulated answer to your question: "${currentQuery}". In a real app, this would be an intelligent response based on the website's content.`;
+      const botResponse = `This is a simulated answer to your question: "${userQuery}". The next step is to get a real AI answer.`;
       setMessages([...newMessages, { sender: "bot", text: botResponse }]);
       setIsLoading(false);
-    }, 2500);
+    }, 1500);
   };
 
   const handleReset = () => {
@@ -112,30 +132,32 @@ export default function App() {
     setIsUrlSet(false);
     setMessages([]);
     setCurrentQuery("");
+    setError("");
+    setScrapedText("");
   };
 
   // The main UI render
   return (
     <div className="font-sans bg-gray-100 flex items-center justify-center min-h-screen">
       <div className="w-full max-w-2xl h-[90vh] bg-white rounded-2xl shadow-2xl flex flex-col overflow-hidden">
-        {/* Header */}
         <header className="bg-gray-800 text-white p-4 flex items-center justify-between shadow-md">
           <div className="flex items-center space-x-3">
-            <BotIcon />
-            <h1 className="text-xl font-bold">Website Chatbot</h1>
+            {" "}
+            <BotIcon /> <h1 className="text-xl font-bold">
+              Website Chatbot
+            </h1>{" "}
           </div>
           {isUrlSet && (
             <button
               onClick={handleReset}
               className="text-sm bg-red-500 hover:bg-red-600 text-white font-bold py-1 px-3 rounded-lg transition-colors duration-300"
             >
-              Reset
+              {" "}
+              Reset{" "}
             </button>
           )}
         </header>
-
         {/* This if else statement is responsible for switching from input to chat UI in the project  */}
-
         <div className="flex-1 flex flex-col p-6 overflow-y-auto bg-gray-50">
           {!isUrlSet ? (
             // URL Input Screen
@@ -147,10 +169,10 @@ export default function App() {
                 <p className="text-gray-500 mb-6">
                   Enter a website URL to begin chatting with its content.
                 </p>
-
                 <div className="relative">
                   <span className="absolute inset-y-0 left-0 flex items-center pl-3">
-                    <GlobeIcon />
+                    {" "}
+                    <GlobeIcon />{" "}
                   </span>
                   <input
                     type="text"
@@ -164,7 +186,7 @@ export default function App() {
                     disabled={isLoading}
                   />
                 </div>
-
+                {error && <p className="text-red-500 text-sm mt-2">{error}</p>}
                 <button
                   onClick={handleSetUrl}
                   disabled={isLoading}
@@ -172,12 +194,14 @@ export default function App() {
                 >
                   {isLoading ? (
                     <>
+                      {" "}
                       <svg
                         className="animate-spin -ml-1 mr-3 h-5 w-5 text-white"
                         xmlns="http://www.w3.org/2000/svg"
                         fill="none"
                         viewBox="0 0 24 24"
                       >
+                        {" "}
                         <circle
                           className="opacity-25"
                           cx="12"
@@ -185,14 +209,14 @@ export default function App() {
                           r="10"
                           stroke="currentColor"
                           strokeWidth="4"
-                        ></circle>
+                        ></circle>{" "}
                         <path
                           className="opacity-75"
                           fill="currentColor"
                           d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
-                        ></path>
-                      </svg>
-                      Processing...
+                        ></path>{" "}
+                      </svg>{" "}
+                      Processing...{" "}
                     </>
                   ) : (
                     "Start Chat"
@@ -211,7 +235,8 @@ export default function App() {
                     msg.sender === "user" ? "justify-end" : ""
                   }`}
                 >
-                  {msg.sender === "bot" && <BotIcon />}
+                  {" "}
+                  {msg.sender === "bot" && <BotIcon />}{" "}
                   <div
                     className={`px-4 py-3 rounded-2xl max-w-lg ${
                       msg.sender === "bot"
@@ -219,29 +244,34 @@ export default function App() {
                         : "bg-indigo-600 text-white rounded-br-none"
                     }`}
                   >
-                    <p className="text-sm whitespace-pre-wrap">{msg.text}</p>
-                  </div>
-                  {msg.sender === "user" && <UserIcon />}
+                    {" "}
+                    <p className="text-sm whitespace-pre-wrap">
+                      {msg.text}
+                    </p>{" "}
+                  </div>{" "}
+                  {msg.sender === "user" && <UserIcon />}{" "}
                 </div>
               ))}
               {isLoading && (
                 <div className="flex items-start gap-3">
-                  <BotIcon />
+                  {" "}
+                  <BotIcon />{" "}
                   <div className="px-4 py-3 rounded-2xl bg-gray-200 text-gray-500 rounded-bl-none">
+                    {" "}
                     <div className="flex items-center space-x-2">
-                      <div className="w-2 h-2 bg-gray-500 rounded-full animate-pulse"></div>
-                      <div className="w-2 h-2 bg-gray-500 rounded-full animate-pulse [animation-delay:0.2s]"></div>
-                      <div className="w-2 h-2 bg-gray-500 rounded-full animate-pulse [animation-delay:0.4s]"></div>
-                    </div>
-                  </div>
+                      {" "}
+                      <div className="w-2 h-2 bg-gray-500 rounded-full animate-pulse"></div>{" "}
+                      <div className="w-2 h-2 bg-gray-500 rounded-full animate-pulse [animation-delay:0.2s]"></div>{" "}
+                      <div className="w-2 h-2 bg-gray-500 rounded-full animate-pulse [animation-delay:0.4s]"></div>{" "}
+                    </div>{" "}
+                  </div>{" "}
                 </div>
               )}
               <div ref={chatEndRef} />
             </div>
           )}
+          {/* Chat Input Area */}
         </div>
-
-        {/* Chat Input Area */}
         {isUrlSet && (
           <div className="p-4 bg-white border-t border-gray-200">
             <div className="relative">
@@ -259,7 +289,8 @@ export default function App() {
                 disabled={isLoading}
                 className="absolute inset-y-0 right-0 flex items-center justify-center w-12 h-full text-indigo-600 hover:text-indigo-800 disabled:text-gray-400 transition-colors"
               >
-                <SendIcon />
+                {" "}
+                <SendIcon />{" "}
               </button>
             </div>
           </div>
