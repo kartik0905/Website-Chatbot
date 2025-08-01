@@ -60,8 +60,8 @@ export default function App() {
   const [isLoading, setIsLoading] = useState(false); //  It remembers if the app is busy waiting for a response
   const [messages, setMessages] = useState([]); //  A list (an array) that remembers every message in the conversation
   const [currentQuery, setCurrentQuery] = useState(""); // Remembers the text the user types into the question box at the bottom
-  const [error, setError] = useState(""); // This was added to remember any error messages
-  const [scrapedText, setScrapedText] = useState(""); // This was added to store the large block of text that our backend sends back after it finishes scraping a website
+  const [error, setError] = useState("");
+  const [scrapedText, setScrapedText] = useState("");
 
   const chatEndRef = useRef(null);
 
@@ -78,31 +78,26 @@ export default function App() {
     }
     setIsLoading(true);
     setError("");
-
-    // This try block uses the command to make a real network request to your backend server
     try {
       const response = await fetch("http://localhost:8000/scrape", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ url: url }),
       });
-
       if (!response.ok) {
-        throw new Error(`Scraping failed with status: ${response.status}`);
+        throw new Error(`Scraping failed`);
       }
-
       const data = await response.json();
-
       setScrapedText(data.text);
       setIsUrlSet(true);
+      // Updated welcome message
       setMessages([
         {
           sender: "bot",
-          text: `Great! I've processed the content from "${url}". What would you like to know?`,
+          text: `Great! I've analyzed the key content from "${url}". What would you like to know?`,
         },
       ]);
     } catch (err) {
-      console.error(err);
       setError(
         "Failed to scrape the website. Please check the URL or try another one."
       );
@@ -112,19 +107,43 @@ export default function App() {
   };
 
   //  This runs when you click the Send icon
-  const handleSendMessage = () => {
+  const handleSendMessage = async () => {
     if (currentQuery.trim() === "" || isLoading) return;
-    const newMessages = [...messages, { sender: "user", text: currentQuery }];
-    setMessages(newMessages);
     const userQuery = currentQuery;
+    const newMessages = [...messages, { sender: "user", text: userQuery }];
+    setMessages(newMessages);
     setCurrentQuery("");
     setIsLoading(true);
+    setError("");
 
-    setTimeout(() => {
-      const botResponse = `This is a simulated answer to your question: "${userQuery}". The next step is to get a real AI answer.`;
+    try {
+      const response = await fetch("http://localhost:8000/ask", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          question: userQuery,
+          context: scrapedText,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error("The AI failed to respond.");
+      }
+
+      const data = await response.json();
+      const botResponse = data.answer;
       setMessages([...newMessages, { sender: "bot", text: botResponse }]);
+    } catch (err) {
+      setMessages([
+        ...newMessages,
+        {
+          sender: "bot",
+          text: "Sorry, I ran into an error. Please try again.",
+        },
+      ]);
+    } finally {
       setIsLoading(false);
-    }, 1500);
+    }
   };
 
   const handleReset = () => {
@@ -136,7 +155,6 @@ export default function App() {
     setScrapedText("");
   };
 
-  // The main UI render
   return (
     <div className="font-sans bg-gray-100 flex items-center justify-center min-h-screen">
       <div className="w-full max-w-2xl h-[90vh] bg-white rounded-2xl shadow-2xl flex flex-col overflow-hidden">
@@ -156,8 +174,8 @@ export default function App() {
               Reset{" "}
             </button>
           )}
+          {/* This if else statement is responsible for switching from input to chat UI in the project  */}
         </header>
-        {/* This if else statement is responsible for switching from input to chat UI in the project  */}
         <div className="flex-1 flex flex-col p-6 overflow-y-auto bg-gray-50">
           {!isUrlSet ? (
             // URL Input Screen
@@ -287,7 +305,7 @@ export default function App() {
               <button
                 onClick={handleSendMessage}
                 disabled={isLoading}
-                className="absolute inset-y-0 right-0 flex items-center justify-center w-12 h-full text-indigo-600 hover:text-indigo-800 disabled:text-gray-400 transition-colors"
+                className="absolute inset-y-0 right-0 flex items-center justify-center w-12 h-all text-indigo-600 hover:text-indigo-800 disabled:text-gray-400 transition-colors"
               >
                 {" "}
                 <SendIcon />{" "}
