@@ -10,7 +10,10 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@langchain/google-genai": "^0.2.16",
     "@tailwindcss/vite": "^4.1.11",
+    "faiss-node": "^0.5.1",
+    "langchain": "^0.3.30",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "tailwindcss": "^4.1.11"
