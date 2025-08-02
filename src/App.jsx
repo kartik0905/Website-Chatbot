@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from "react";
 
-// Helper Components for Icons 
+// --- Helper Components ---
 const Icon = ({ path, className = "w-6 h-6" }) => (
   <svg
     xmlns="http://www.w3.org/2000/svg"
@@ -10,7 +10,8 @@ const Icon = ({ path, className = "w-6 h-6" }) => (
     stroke="currentColor"
     className={className}
   >
-    <path strokeLinecap="round" strokeLinejoin="round" d={path} />
+    {" "}
+    <path strokeLinecap="round" strokeLinejoin="round" d={path} />{" "}
   </svg>
 );
 const GlobeIcon = () => (
@@ -44,284 +45,264 @@ const UserIcon = () => (
   </div>
 );
 
-//Main App Component
+// --- Main App Component ---
 export default function App() {
-  // --- STATE MANAGEMENT ---
-  // This section holds the "memory" of our application.
+  const [url, setUrl] = useState(""); // Remembers the URL the user wants to crawl.
+  const [jobId, setJobId] = useState(null); // Stores the unique ID for the current crawl job.
+  const [crawlStatus, setCrawlStatus] = useState("idle"); /// The "traffic light" for the UI: idle, crawling, complete, or error.
+  const [logs, setLogs] = useState([]); // An array that stores the live progress messages from the server.
+  const [isReadyToChat, setIsReadyToChat] = useState(false); // Becomes true when the crawl is complete, allowing the chat UI to show.
+  const [messages, setMessages] = useState([]); // Stores the messages in the chat conversation.
+  const [currentQuery, setCurrentQuery] = useState(""); // Remembers the text in the question input box.
+  const [isLoading, setIsLoading] = useState(false); // For the "thinking..." dots when asking a question.
+  const [error, setError] = useState(""); // Stores any error messages to display to the user.
 
-  // Remembers the URL the user types in the input box.
-  const [url, setUrl] = useState("");
-  // Tracks the slow, one-time "learning" or "indexing" process. Used for the main loading spinner.
-  const [isIndexing, setIsIndexing] = useState(false);
-  // Becomes true after the backend successfully creates the knowledge base. Controls the switch to the chat view.
-  const [isIndexed, setIsIndexed] = useState(false);
-  // Tracks the fast loading state when asking a question (the "thinking..." dots).
-  const [isLoading, setIsLoading] = useState(false);
-  // An array that stores all the messages in the current conversation.
-  const [messages, setMessages] = useState([]);
-  // Remembers the text the user is currently typing in the question box.
-  const [currentQuery, setCurrentQuery] = useState("");
-  // Stores any error messages to display to the user.
-  const [error, setError] = useState("");
+  const logEndRef = useRef(null); // A "bookmark" for the bottom of the log viewer for auto-scrolling.
+  const chatEndRef = useRef(null); // A "bookmark" for the bottom of the chat window for auto-scrolling.
 
-  // --- REFS AND EFFECTS ---
+  // --- The "Live Update" Engine (Polling Effect) ---
+  useEffect(() => {
+    // This effect only runs if we have a job ID and the status is "crawling".
+    if (!jobId || crawlStatus !== "crawling") return;
 
-  // Creates a "bookmark" that we can attach to an element to scroll to it.
-  const chatEndRef = useRef(null);
+    // Start a timer that will "poll" (ask for updates from) the server every 2 seconds.
+    const intervalId = setInterval(async () => {
+      try {
+        // Ask the server for the latest status of our specific job.
+        const response = await fetch(
+          `http://localhost:8000/crawl-status/${jobId}`
+        );
+        if (!response.ok) return; // If the server has a temporary error, just wait for the next poll.
 
-  // This "effect" runs every time the `messages` array changes.
-  // Its job is to automatically scroll the chat window to the bottom to show the latest message.
+        const data = await response.json();
+        // Update our local logs with the latest logs from the server.
+        setLogs(data.logs);
+
+        // If the server says the job is done (complete or error), we stop polling.
+        if (data.status === "complete" || data.status === "error") {
+          setCrawlStatus(data.status); // Update the overall status.
+          setIsReadyToChat(data.status === "complete"); // Allow chatting only if it was a success.
+          clearInterval(intervalId); // CRITICAL: This stops the timer from running forever.
+        }
+      } catch (e) {
+        console.error("Polling error:", e);
+      }
+    }, 2000);
+
+    
+    // This cleanup function is CRITICAL. It runs when the component unmounts
+    // to prevent memory leaks from the timer.
+    return () => clearInterval(intervalId);
+  }, [jobId, crawlStatus]); // This effect re-runs only when jobId or crawlStatus changes.
+
+  useEffect(() => {
+    logEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [logs]);
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  // --- CORE FUNCTIONS ---
-
-  /**
-   * Handles the one-time indexing of a URL.
-   * This function calls the backend to scrape the website, create embeddings,
-   * and save the knowledge base to a file.
-   */
-  const handleIndexUrl = async () => {
-    // Basic validation to ensure the URL is not empty.
+  const handleStartCrawl = async () => {
     if (url.trim() === "") {
-      setError("Please enter a valid URL.");
+      setError("Please enter a valid starting URL.");
       return;
     }
-    // Start the main loading spinner and clear any previous errors/messages.
-    setIsIndexing(true);
+    setCrawlStatus("crawling");
     setError("");
+    setLogs(["Starting crawl..."]);
     setMessages([]);
+    setIsReadyToChat(false);
 
     try {
-      // Send the URL to our backend's /index-website endpoint.
-      const response = await fetch("http://localhost:8000/index-website", {
+      const response = await fetch("http://localhost:8000/crawl-and-index", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url }),
+        body: JSON.stringify({ startUrl: url }),
       });
 
-      // If the server responds with an error, parse the error message and throw it.
-      if (!response.ok) {
-        const errData = await response.json();
-        throw new Error(errData.error || "Failed to index the website.");
+      const data = await response.json();
+      if (response.status === 200) {
+        // Knowledge base already existed
+        setCrawlStatus("complete");
+        setIsReadyToChat(true);
+        setLogs([data.message]);
+      } else if (response.status === 202) {
+        // Crawl started successfully
+        setJobId(data.jobId); // Save the Job ID to start polling
+      } else {
+        throw new Error(data.error || "Failed to start crawl.");
       }
-
-      // If successful, switch the UI to the chat view.
-      setIsIndexed(true);
-      // Add the first message from the bot to start the conversation.
-      setMessages([
-        {
-          sender: "bot",
-          text: `Great! I've learned everything from "${url}". What would you like to know?`,
-        },
-      ]);
     } catch (err) {
-      // If any part of the process fails, show the error message to the user.
       setError(err.message);
-    } finally {
-      // No matter what happens (success or failure), stop the main loading spinner.
-      setIsIndexing(false);
+      setCrawlStatus("error");
     }
   };
 
-  /**
-   * Handles sending a user's question to the backend to get an AI-powered answer.
-   * It uses the knowledge base that was created by handleIndexUrl.
-   */
   const handleAskQuestion = async () => {
-    // Prevent sending empty messages or sending while the bot is already thinking.
     if (currentQuery.trim() === "" || isLoading) return;
-
     const userQuery = currentQuery;
-    // Add the user's message to the chat history immediately for a responsive feel.
     const newMessages = [...messages, { sender: "user", text: userQuery }];
     setMessages(newMessages);
-    // Clear the input box.
     setCurrentQuery("");
-    // Show the "thinking..." dots.
     setIsLoading(true);
-    setError("");
 
     try {
-      // Send the user's question AND the original URL to the /ask-indexed endpoint.
-      // The URL is crucial for the server to know which knowledge file to load.
-      const response = await fetch("http://localhost:8000/ask-indexed", {
+      const response = await fetch("http://localhost:8000/ask-crawler", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question: userQuery, url: url }),
+        body: JSON.stringify({ question: userQuery, baseUrl: url }),
       });
-
       if (!response.ok) {
         const errData = await response.json();
-        throw new Error(errData.error || "The AI failed to respond.");
+        throw new Error(errData.error);
       }
-
-      // If successful, get the AI's answer from the response.
       const data = await response.json();
-      const botResponse = data.answer;
-      // Add the bot's answer to the chat history.
-      setMessages([...newMessages, { sender: "bot", text: botResponse }]);
+      setMessages([...newMessages, { sender: "bot", text: data.answer }]);
     } catch (err) {
-      // If something goes wrong, add an error message to the chat.
       setMessages([
         ...newMessages,
-        { sender: "bot", text: `Sorry, I ran into an error: ${err.message}` },
+        { sender: "bot", text: `Sorry, an error occurred: ${err.message}` },
       ]);
     } finally {
-      // No matter what, stop the "thinking..." dots.
       setIsLoading(false);
     }
   };
 
-  /**
-   * Resets the entire application state to its initial values,
-   * allowing the user to start over with a new URL.
-   */
   const handleReset = () => {
     setUrl("");
-    setIsIndexed(false);
-    setIsIndexing(false);
+    setJobId(null);
+    setCrawlStatus("idle");
+    setLogs([]);
+    setIsReadyToChat(false);
     setMessages([]);
     setCurrentQuery("");
     setError("");
   };
 
-  // --- JSX RENDER ---
-  // This section describes what the user sees on the screen.
-  return (
-    <div className="font-sans bg-gray-100 flex items-center justify-center min-h-screen">
-      <div className="w-full max-w-2xl h-[90vh] bg-white rounded-2xl shadow-2xl flex flex-col overflow-hidden">
-        {/* Header section */}
-        <header className="bg-gray-800 text-white p-4 flex items-center justify-between shadow-md">
-          <div className="flex items-center space-x-3">
-            <BotIcon /> <h1 className="text-xl font-bold">Website Chatbot</h1>
-          </div>
-          {/* The "Reset" button only appears after a website has been successfully indexed. */}
-          {isIndexed && (
+  const renderContent = () => {
+    if (crawlStatus === "idle" || crawlStatus === "error") {
+      return (
+        <div className="flex-1 flex flex-col items-center justify-center text-center">
+          <div className="w-full max-w-md">
+            <h2 className="text-2xl font-semibold text-gray-700 mb-2">
+              Create a Website Expert
+            </h2>
+            <p className="text-gray-500 mb-6">
+              Enter a starting URL. The crawler will learn from the entire
+              website to answer your questions.
+            </p>
+            <div className="relative">
+              <span className="absolute inset-y-0 left-0 flex items-center pl-3">
+                {" "}
+                <GlobeIcon />{" "}
+              </span>
+              <input
+                type="text"
+                value={url}
+                onChange={(e) => setUrl(e.target.value)}
+                onKeyPress={(e) => e.key === "Enter" && handleStartCrawl()}
+                placeholder="https://www.example.com"
+                className="w-full pl-10 pr-4 py-3 border border-gray-300 rounded-lg"
+              />
+            </div>
+            {error && <p className="text-red-500 text-sm mt-2">{error}</p>}
             <button
-              onClick={handleReset}
-              className="text-sm bg-red-500 hover:bg-red-600 text-white font-bold py-1 px-3 rounded-lg transition-colors duration-300"
+              onClick={handleStartCrawl}
+              className="mt-4 w-full bg-indigo-600 text-white font-bold py-3 px-4 rounded-lg hover:bg-indigo-700"
             >
-              Reset
+              Crawl & Index Website
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    if (
+      crawlStatus === "crawling" ||
+      (crawlStatus === "complete" && !isReadyToChat)
+    ) {
+      return (
+        <div>
+          <h2 className="text-xl font-semibold text-gray-800 mb-4">
+            Crawler Progress...
+          </h2>
+          <div className="bg-gray-900 text-white font-mono text-xs p-4 rounded-lg shadow-md h-[60vh] overflow-y-auto">
+            {logs.map((log, index) => (
+              <p key={index} className="text-green-400">
+                {log}
+              </p>
+            ))}
+            {crawlStatus === "crawling" && (
+              <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse mt-2"></div>
+            )}
+            <div ref={logEndRef} />
+          </div>
+          {crawlStatus === "complete" && (
+            <button
+              onClick={() => setIsReadyToChat(true)}
+              className="mt-4 w-full bg-green-600 text-white font-bold py-3 px-4 rounded-lg hover:bg-green-700"
+            >
+              Start Chatting
             </button>
           )}
-        </header>
+        </div>
+      );
+    }
 
-        {/* Main content area */}
-        <div className="flex-1 flex flex-col p-6 overflow-y-auto bg-gray-50">
-          {/* --- Conditional Rendering: Decides which screen to show --- */}
-          {/* If a website has NOT been indexed yet, show the URL input screen. */}
-          {!isIndexed ? (
-            <div className="flex-1 flex flex-col items-center justify-center text-center">
-              <div className="w-full max-w-md">
-                <h2 className="text-2xl font-semibold text-gray-700 mb-2">
-                  Learn from a Website
-                </h2>
-                <p className="text-gray-500 mb-6">
-                  Enter a website URL to create a knowledge base from its
-                  content.
-                </p>
-                <div className="relative">
-                  <span className="absolute inset-y-0 left-0 flex items-center pl-3">
-                    {" "}
-                    <GlobeIcon />{" "}
-                  </span>
-                  <input
-                    type="text"
-                    value={url}
-                    onChange={(e) => setUrl(e.target.value)}
-                    onKeyPress={(e) =>
-                      e.key === "Enter" && !isIndexing && handleIndexUrl()
-                    }
-                    placeholder="https://www.example.com/article"
-                    className="w-full pl-10 pr-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-shadow duration-200"
-                    disabled={isIndexing}
-                  />
+    if (isReadyToChat) {
+      return (
+        <>
+          <div className="flex-1 space-y-6">
+            {messages.length === 0 && (
+              <div className="flex items-start gap-3">
+                <BotIcon />
+                <div className="px-4 py-3 rounded-2xl max-w-lg bg-gray-200 text-gray-800 rounded-bl-none">
+                  <p className="text-sm">
+                    Knowledge base for <strong>{new URL(url).hostname}</strong>{" "}
+                    is ready. What would you like to know?
+                  </p>
                 </div>
-                {/* Display any error messages that occur during indexing. */}
-                {error && <p className="text-red-500 text-sm mt-2">{error}</p>}
-                <button
-                  onClick={handleIndexUrl}
-                  disabled={isIndexing}
-                  className="mt-4 w-full bg-indigo-600 text-white font-bold py-3 px-4 rounded-lg hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:bg-indigo-400 disabled:cursor-not-allowed transition-all duration-300 flex items-center justify-center"
-                >
-                  {/* The button's text and spinner change based on the `isIndexing` state. */}
-                  {isIndexing ? (
-                    <>
-                      <svg
-                        className="animate-spin -ml-1 mr-3 h-5 w-5 text-white"
-                        xmlns="http://www.w3.org/2000/svg"
-                        fill="none"
-                        viewBox="0 0 24 24"
-                      >
-                        <circle
-                          className="opacity-25"
-                          cx="12"
-                          cy="12"
-                          r="10"
-                          stroke="currentColor"
-                          strokeWidth="4"
-                        ></circle>
-                        <path
-                          className="opacity-75"
-                          fill="currentColor"
-                          d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
-                        ></path>
-                      </svg>
-                      Indexing Website...
-                    </>
-                  ) : (
-                    "Index Website"
-                  )}
-                </button>
               </div>
-            </div>
-          ) : (
-            /* If a website HAS been indexed, show the chat screen. */
-            <div className="flex-1 space-y-6">
-              {/* Loop through the `messages` array and render a chat bubble for each one. */}
-              {messages.map((msg, index) => (
+            )}
+            {messages.map((msg, index) => (
+              <div
+                key={index}
+                className={`flex items-start gap-3 ${
+                  msg.sender === "user" ? "justify-end" : ""
+                }`}
+              >
+                {" "}
+                {msg.sender === "bot" && <BotIcon />}{" "}
                 <div
-                  key={index}
-                  className={`flex items-start gap-3 ${
-                    msg.sender === "user" ? "justify-end" : ""
+                  className={`px-4 py-3 rounded-2xl max-w-lg ${
+                    msg.sender === "bot"
+                      ? "bg-gray-200 text-gray-800 rounded-bl-none"
+                      : "bg-indigo-600 text-white rounded-br-none"
                   }`}
                 >
-                  {msg.sender === "bot" && <BotIcon />}
-                  <div
-                    className={`px-4 py-3 rounded-2xl max-w-lg ${
-                      msg.sender === "bot"
-                        ? "bg-gray-200 text-gray-800 rounded-bl-none"
-                        : "bg-indigo-600 text-white rounded-br-none"
-                    }`}
-                  >
-                    <p className="text-sm whitespace-pre-wrap">{msg.text}</p>
-                  </div>
-                  {msg.sender === "user" && <UserIcon />}
-                </div>
-              ))}
-              {/* Show the "thinking..." dots loading indicator while waiting for an answer. */}
-              {isLoading && (
-                <div className="flex items-start gap-3">
-                  <BotIcon />
-                  <div className="px-4 py-3 rounded-2xl bg-gray-200 text-gray-500 rounded-bl-none">
-                    <div className="flex items-center space-x-2">
-                      <div className="w-2 h-2 bg-gray-500 rounded-full animate-pulse"></div>
-                      <div className="w-2 h-2 bg-gray-500 rounded-full animate-pulse [animation-delay:0.2s]"></div>
-                      <div className="w-2 h-2 bg-gray-500 rounded-full animate-pulse [animation-delay:0.4s]"></div>
-                    </div>
-                  </div>
-                </div>
-              )}
-              {/* This is our invisible "bookmark" element for auto-scrolling. */}
-              <div ref={chatEndRef} />
-            </div>
-          )}
-        </div>
-
-        {/* The chat input box only appears after a website has been indexed. */}
-        {isIndexed && (
+                  {" "}
+                  <p className="text-sm whitespace-pre-wrap">{msg.text}</p>{" "}
+                </div>{" "}
+                {msg.sender === "user" && <UserIcon />}{" "}
+              </div>
+            ))}
+            {isLoading && (
+              <div className="flex items-start gap-3">
+                {" "}
+                <BotIcon />{" "}
+                <div className="px-4 py-3 rounded-2xl bg-gray-200 text-gray-500 rounded-bl-none">
+                  {" "}
+                  <div className="flex items-center space-x-2">
+                    {" "}
+                    <div className="w-2 h-2 bg-gray-500 rounded-full animate-pulse"></div>{" "}
+                    <div className="w-2 h-2 bg-gray-500 rounded-full animate-pulse [animation-delay:0.2s]"></div>{" "}
+                    <div className="w-2 h-2 bg-gray-500 rounded-full animate-pulse [animation-delay:0.4s]"></div>{" "}
+                  </div>{" "}
+                </div>{" "}
+              </div>
+            )}
+            <div ref={chatEndRef} />
+          </div>
           <div className="p-4 bg-white border-t border-gray-200">
             <div className="relative">
               <input
@@ -330,19 +311,47 @@ export default function App() {
                 onChange={(e) => setCurrentQuery(e.target.value)}
                 onKeyPress={(e) => e.key === "Enter" && handleAskQuestion()}
                 placeholder="Ask a question..."
-                className="w-full pr-12 pl-4 py-3 border border-gray-300 rounded-full focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-shadow duration-200"
+                className="w-full pr-12 pl-4 py-3 border border-gray-300 rounded-full"
                 disabled={isLoading}
               />
               <button
                 onClick={handleAskQuestion}
                 disabled={isLoading}
-                className="absolute inset-y-0 right-0 flex items-center justify-center w-12 h-full text-indigo-600 hover:text-indigo-800 disabled:text-gray-400 transition-colors"
+                className="absolute inset-y-0 right-0 flex items-center justify-center w-12 h-full text-indigo-600"
               >
-                <SendIcon />
+                {" "}
+                <SendIcon />{" "}
               </button>
             </div>
           </div>
-        )}
+        </>
+      );
+    }
+  };
+
+  return (
+    <div className="font-sans bg-gray-100 flex items-center justify-center min-h-screen">
+      <div className="w-full max-w-2xl h-[90vh] bg-white rounded-2xl shadow-2xl flex flex-col overflow-hidden">
+        <header className="bg-gray-800 text-white p-4 flex items-center justify-between shadow-md">
+          <div className="flex items-center space-x-3">
+            {" "}
+            <BotIcon />{" "}
+            <h1 className="text-xl font-bold">
+              Website Crawler & Chatbot
+            </h1>{" "}
+          </div>
+          <button
+            onClick={handleReset}
+            className="text-sm bg-red-500 hover:bg-red-600 text-white font-bold py-1 px-3 rounded-lg"
+          >
+            {" "}
+            Reset{" "}
+          </button>
+        </header>
+
+        <div className="flex-1 flex flex-col p-6 overflow-y-auto bg-gray-50">
+          {renderContent()}
+        </div>
       </div>
     </div>
   );

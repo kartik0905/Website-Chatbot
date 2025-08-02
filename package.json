@@ -12,6 +12,7 @@
   "dependencies": {
     "@langchain/google-genai": "^0.2.16",
     "@tailwindcss/vite": "^4.1.11",
+    "express-ws": "^5.0.2",
     "faiss-node": "^0.5.1",
     "langchain": "^0.3.30",
     "react": "^19.1.0",

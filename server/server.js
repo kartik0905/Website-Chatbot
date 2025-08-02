@@ -1,210 +1,240 @@
-// 1. Import necessary libraries
 const express = require("express");
 const cors = require("cors");
 const puppeteer = require("puppeteer");
 const fs = require("fs");
 const path = require("path");
+const urlParse = require("url-parse"); // Helper for easily handling and parsing URLs
+const crypto = require("crypto"); // Built-in Node.js module to generate unique IDs for our crawl jobs
 
-// Import the direct Google AI SDK, which we use for the final, stable AI call.
-const { GoogleGenerativeAI } = require("@google/generative-ai");
-
-// Import specific, powerful tools from the LangChain framework.
-const { RecursiveCharacterTextSplitter } = require("langchain/text_splitter"); // This tool intelligently splits large texts into smaller chunks.
-const { GoogleGenerativeAIEmbeddings } = require("@langchain/google-genai"); // This connects to Google's model that turns text into vector embeddings (meaningful numbers).
-const { FaissStore } = require("@langchain/community/vectorstores/faiss"); // This is our local vector database that creates and searches the "smart index".
-
+const { GoogleGenerativeAI } = require("@google/generative-ai"); // The official Google AI SDK for the final answering step
+const { RecursiveCharacterTextSplitter } = require("langchain/text_splitter"); // LangChain's tool for splitting text into chunks
+const { GoogleGenerativeAIEmbeddings } = require("@langchain/google-genai"); // LangChain's tool for creating vector embeddings
+const { FaissStore } = require("@langchain/community/vectorstores/faiss"); // LangChain's tool for our local vector database
 
 const GOOGLE_API_KEY = "AIzaSyB-XEzWfq6eEwgGMI_z3ueFkxNeCulitxk";
 
-// 2. Initialize Server and AI Client
 const app = express();
 const PORT = 8000;
 const genAI = new GoogleGenerativeAI(GOOGLE_API_KEY);
 
-// 3. Set up middleware
-// 'cors' allows our React app (on a different port) to communicate with this server.
-app.use(cors());
-// 'express.json' allows the server to understand JSON data sent from the React app.
-app.use(express.json());
+// Set up middleware
+app.use(cors()); // Allows our React app to communicate with this server
+app.use(express.json()); // Allows the server to understand JSON data from the React app.
+
+// --- In-Memory Job Store ---
+// This object acts as a simple, temporary database to keep track of the status and logs of active crawl jobs.
+const crawlJobs = {};
 
 // --- Vector Store Configuration ---
-// Defines a folder named 'vector_stores' to save our knowledge files.
+// Defines the folder where all our saved "knowledge files" (vector stores) will be kept
 const vectorStorePath = path.join(__dirname, "vector_stores");
-if (!fs.existsSync(vectorStorePath)) {
-  fs.mkdirSync(vectorStorePath);
-}
 
-// This function creates a unique and safe filename for each URL's knowledge file.
+// This function creates a unique and safe filename for each website's knowledge file based on its domain name
 const getStorePathForUrl = (url) => {
-  const urlHash = Buffer.from(url).toString("base64url");
-  return path.join(vectorStorePath, `faiss_store_${urlHash}`);
+  if (!fs.existsSync(vectorStorePath)) fs.mkdirSync(vectorStorePath);
+  const domain = new urlParse(url).hostname;
+  return path.join(
+    vectorStorePath,
+    `faiss_store_${domain.replace(/\./g, "_")}`
+  );
 };
 
-// --- The "Learning" Endpoint ---
-// This endpoint performs the deep, one-time study of a webpage.
-app.post("/index-website", async (req, res) => {
-  const { url } = req.body;
-  if (!url) return res.status(400).json({ error: "URL is required" });
+// --- THE UNLIMITED CRAWLER ENDPOINT ---
+// This is the main endpoint that kicks off the entire crawl-and-learn process
+app.post("/crawl-and-index", (req, res) => {
+  const { startUrl } = req.body;
+  if (!startUrl) return res.status(400).json({ error: "startUrl is required" });
 
-  // Check if a knowledge file for this URL already exists to avoid re-scraping.
-  const storePath = getStorePathForUrl(url);
+  const domain = new urlParse(startUrl).hostname;
+  const storePath = getStorePathForUrl(startUrl);
+
+  // First, check if we have already created a knowledge base for this website
   if (fs.existsSync(storePath)) {
-    console.log(`[Server] Vector store for ${url} already exists.`);
-    return res.json({ message: `URL already indexed.` });
+    // If we have, we don't need to crawl again. We can tell the user it's ready
+    return res.json({
+      message: `Knowledge base for ${domain} already exists.`,
+    });
   }
 
-  console.log(`[Server] Starting indexing for URL: ${url}`);
-  let browser;
-  try {
-    // Launch the Puppeteer "robot browser".
-    browser = await puppeteer.launch({ headless: "new" });
-    // Open a new tab.
-    const page = await browser.newPage();
-    // Navigate to the user's URL, waiting for the page and its dynamic content to fully load.
-    await page.goto(url, { waitUntil: "networkidle2", timeout: 60000 });
+  // Create a unique "Order Number" (jobId) for this crawl
+  const jobId = crypto.randomUUID();
+  crawlJobs[jobId] = {
+    id: jobId,
+    status: "running",
+    logs: [`Crawl started for ${domain}...`],
+  };
+  // Immediately send a "202 Accepted" response back to the React app.
+  res.status(202).json({ jobId });
 
-    // --- ROBUST COOKIE HANDLING ---
-    // This block tries to find and click common cookie consent pop-ups,
-    // which often block the main content of a page.
+  // This self-invoking async function runs the entire long crawl process in the background, So the frontend doesn't have to wait for it to finish
+  (async () => {
+    let browser;
     try {
-      console.log("[Server] Looking for cookie consent buttons...");
-      const cookieSelectors = [
-        "#onetrust-accept-btn-handler", // A common selector (used by Reuters)
-        'button[data-testid="accept-button"]',
-        'button:has-text("Accept All")',
-        'button:has-text("Accept")',
-      ];
-      for (const selector of cookieSelectors) {
+      // Initialize the crawler's "To-Do list" (queue) and "Done list" (visited).
+      const queue = [startUrl];
+      const visited = new Set();
+      let vectorStore; // This will hold the combined knowledge of the whole site.
+      const embeddings = new GoogleGenerativeAIEmbeddings({
+        apiKey: GOOGLE_API_KEY,
+      });
+
+      // Launch the Puppeteer browser with a long timeout for stability.
+      browser = await puppeteer.launch({
+        headless: "new",
+        protocolTimeout: 90000,
+      });
+      const page = await browser.newPage();
+
+      // --- OPTIMIZATION: Block unnecessary resources to speed up the crawl ---
+      // We tell Puppeteer to intercept all network requests.
+      await page.setRequestInterception(true);
+      page.on("request", (req) => {
+        // If the request is for an image, stylesheet, or font, we block it
+        if (["image", "stylesheet", "font"].includes(req.resourceType())) {
+          req.abort();
+        } else {
+          req.continue();
+        }
+      });
+
+      // --- The Main Crawler Loop ---
+      // The loop continues as long as there are pages in the "To-Do list"
+      while (queue.length > 0) {
+        const currentUrl = queue.shift();
+        if (visited.has(currentUrl)) continue;
+
+        visited.add(currentUrl);
+        // Update the logs for the frontend to see
+        crawlJobs[jobId].logs.push(`(${visited.size}) Visiting: ${currentUrl}`);
+
         try {
-          await page.waitForSelector(selector, { timeout: 2000 });
-          await page.click(selector);
-          console.log(
-            `[Server] Clicked cookie button with selector: ${selector}`
+          await page.goto(currentUrl, {
+            waitUntil: "networkidle2",
+            timeout: 60000,
+          });
+          const textContent = await page.evaluate(
+            () => document.body.innerText
           );
-          await new Promise((resolve) => setTimeout(resolve, 1000)); // Wait for the banner to disappear.
-          break;
-        } catch (e) {
-          // If a selector isn't found, it just tries the next one.
+
+          if (textContent && textContent.trim().length > 50) {
+            const splitter = new RecursiveCharacterTextSplitter({
+              chunkSize: 1000,
+              chunkOverlap: 100,
+            });
+            const docs = await splitter.createDocuments([textContent]);
+            if (docs.length > 0) {
+              if (!vectorStore) {
+                vectorStore = await FaissStore.fromDocuments(docs, embeddings);
+              } else {
+                await vectorStore.addDocuments(docs);
+              }
+            }
+          }
+
+          // Find all the valid, non-file, same-domain links on the current page.
+          const links = await page.evaluate((baseDomain) => {
+            const allLinks = Array.from(document.querySelectorAll("a"));
+            const uniqueLinks = new Set();
+            const fileExtensions = [".pdf", ".zip", ".tar.gz", ".png", ".jpg"];
+            allLinks.forEach((link) => {
+              try {
+                const cleanHref = link.href.split("#")[0];
+                if (
+                  new URL(cleanHref).hostname === baseDomain &&
+                  !fileExtensions.some((ext) =>
+                    cleanHref.toLowerCase().endsWith(ext)
+                  )
+                ) {
+                  uniqueLinks.add(cleanHref);
+                }
+              } catch (e) {}
+            });
+            return Array.from(uniqueLinks);
+          }, domain);
+
+          // Update the logs with our findings.
+          crawlJobs[jobId].logs.push(
+            `---> Found ${links.length} new links. Queue size: ${queue.length}`
+          );
+
+          links.forEach((link) => {
+            if (!visited.has(link)) queue.push(link);
+          });
+        } catch (error) {
+          // If one page fails, we log the error and continue to the next page.
+          crawlJobs[jobId].logs.push(
+            `---> Failed to process ${currentUrl}: ${error.message}`
+          );
         }
       }
-    } catch (e) {
-      console.log("[Server] Error during cookie handling, but proceeding.");
+
+      // After the crawl is finished, save the master knowledge file.
+      if (vectorStore) {
+        await vectorStore.save(storePath);
+        // Update the job status to "complete".
+        crawlJobs[jobId].status = "complete";
+        crawlJobs[jobId].logs.push(
+          `Crawl complete! Indexed ${visited.size} pages. Knowledge base is ready.`
+        );
+      } else {
+        throw new Error(
+          "Could not create a vector store. The website might be blocking scrapers."
+        );
+      }
+    } catch (error) {
+      console.error("[Crawler] A critical error occurred:", error);
+      crawlJobs[jobId].status = "error";
+      crawlJobs[jobId].logs.push(`Crawl failed: ${error.message}`);
+    } finally {
+      if (browser) await browser.close();
     }
-
-    // SURGICAL SCRAPING LOGIC
-    // Instead of grabbing all text, this surgically extracts text from only meaningful HTML tags.
-    // This results in cleaner, more relevant data for the AI.
-    const textContent = await page.evaluate(() => {
-      // First, try to find the main content area of the page. If not found, fall back to the whole body.
-      const mainContent =
-        document.querySelector(
-          'main, article, [role="main"], #main, #content, .main, .content'
-        ) || document.body;
-
-      // Define the list of tags that usually contain important text.
-      const selectors = "p, h1, h2, h3, h4, li, a, span";
-      const elements = Array.from(mainContent.querySelectorAll(selectors));
-
-      // Extract the text from each element, filtering out short, noisy text.
-      let texts = elements
-        .map((el) => {
-          const text = el.innerText.trim();
-          if (text.length > 10 && text.includes(" ")) {
-            return text;
-          }
-          return null;
-        })
-        .filter(Boolean);
-
-      // Remove any duplicate text snippets, which are common in complex web layouts.
-      const uniqueTexts = [...new Set(texts)];
-      return uniqueTexts.join("\n\n");
-    });
-
-    console.log(
-      `[Server] Surgically scraped ${textContent.length} characters.`
-    );
-
-    // This check ensures that if a site blocks our scraper, we stop with a clear error.
-    if (!textContent || textContent.trim().length < 100) {
-      throw new Error(
-        `Scraping yielded too little content (${textContent.length} chars). This site is likely protected against scraping.`
-      );
-    }
-
-    // Use LangChain's splitter to break the clean text into chunks.
-    const splitter = new RecursiveCharacterTextSplitter({
-      chunkSize: 1000,
-      chunkOverlap: 100,
-    });
-    const docs = await splitter.createDocuments([textContent]);
-    console.log(`[Server] Split text into ${docs.length} chunks.`);
-
-    if (docs.length === 0) {
-      throw new Error(
-        "Could not create any text chunks from the scraped content."
-      );
-    }
-
-    // Use LangChain to create vector embeddings for each chunk and build the vector store.
-    const embeddings = new GoogleGenerativeAIEmbeddings({
-      apiKey: GOOGLE_API_KEY,
-    });
-    const vectorStore = await FaissStore.fromDocuments(docs, embeddings);
-
-    // Save the final "knowledge file" to the disk.
-    await vectorStore.save(storePath);
-    console.log(`[Server] Vector store saved successfully at ${storePath}`);
-
-    res.json({ message: "Website indexed successfully." });
-  } catch (error) {
-    console.error("[Server] Indexing failed:", error.message);
-    // --- CLEANUP LOGIC ---
-    // If the indexing process fails at any point, this cleans up any partially created files.
-    if (fs.existsSync(storePath)) {
-      fs.rmSync(storePath, { recursive: true, force: true });
-      console.log(`[Server] Cleaned up failed index at ${storePath}`);
-    }
-    res
-      .status(500)
-      .json({ error: error.message || "Failed to index the website." });
-  } finally {
-    // This ensures the Puppeteer browser is always closed, even if an error occurs.
-    if (browser) await browser.close();
-  }
+  })();
 });
 
-// --- The "Answering" Endpoint ---
-// This endpoint uses the saved knowledge file to answer questions quickly and accurately.
-app.post("/ask-indexed", async (req, res) => {
-  const { question, url } = req.body;
-  if (!question || !url)
-    return res.status(400).json({ error: "Question and URL are required." });
+// --- The Status Endpoint for Polling ---
+// The React app calls this endpoint every 2 seconds to get live updates.
+app.get("/crawl-status/:jobId", (req, res) => {
+  const { jobId } = req.params;
+  const job = crawlJobs[jobId];
+  if (!job) {
+    return res.status(404).json({ error: "Job not found." });
+  }
+  res.json(job);
+});
 
-  const storePath = getStorePathForUrl(url);
+// --- The Final Answering Endpoint ---
+app.post("/ask-crawler", async (req, res) => {
+  const { question, baseUrl } = req.body;
+  if (!question || !baseUrl)
+    return res
+      .status(400)
+      .json({ error: "Question and baseUrl are required." });
+
+  const storePath = getStorePathForUrl(baseUrl);
   if (!fs.existsSync(storePath)) {
     return res
       .status(404)
-      .json({ error: "This website has not been indexed yet." });
+      .json({ error: "No knowledge base found for this website." });
   }
 
   try {
-    // Load the saved knowledge file from the disk.
+    // Load the correct knowledge file from the disk.
     const embeddings = new GoogleGenerativeAIEmbeddings({
       apiKey: GOOGLE_API_KEY,
     });
     const loadedVectorStore = await FaissStore.load(storePath, embeddings);
 
-    // Create a "retriever" which is a tool for searching the knowledge file.
+    // Create the retriever tool for semantic search.
     const retriever = loadedVectorStore.asRetriever();
-    // Perform the semantic search to find the most relevant text chunks related to the question.
+
+    // Find the most relevant text chunks from the entire website.
     const relevantDocs = await retriever.getRelevantDocuments(question);
     const context = relevantDocs.map((doc) => doc.pageContent).join("\n\n");
 
-    // Create a clear, specific prompt for the AI, giving it the relevant context.
-    const prompt = `Based only on the following context, answer the question. If you don't know the answer, just say that you don't know.\n\nCONTEXT: """${context}"""\n\nQUESTION: ${question}`;
+    // Build the prompt with the precise context for the AI.
+    const prompt = `Based only on the following context from the website, answer the question. If you don't know the answer, just say that you don't know.\n\nCONTEXT: """${context}"""\n\nQUESTION: ${question}`;
 
-    // Use the direct Google AI SDK to get the final answer.
+    // Get the final answer from the Gemini model.
     const model = genAI.getGenerativeModel({
       model: "gemini-1.5-flash-latest",
     });
@@ -219,8 +249,7 @@ app.post("/ask-indexed", async (req, res) => {
   }
 });
 
-// 7. Start the server
-// This command turns on the server and makes it listen for requests from the React app.
+// Start the server
 app.listen(PORT, () => {
   console.log(`Server is running on http://localhost:${PORT}`);
 });
