@@ -11,7 +11,7 @@ const { RecursiveCharacterTextSplitter } = require("langchain/text_splitter"); /
 const { GoogleGenerativeAIEmbeddings } = require("@langchain/google-genai"); // LangChain's tool for creating vector embeddings
 const { FaissStore } = require("@langchain/community/vectorstores/faiss"); // LangChain's tool for our local vector database
 
-const GOOGLE_API_KEY = "AIzaSyB-XEzWfq6eEwgGMI_z3ueFkxNeCulitxk";
+const GOOGLE_API_KEY = "AIzaSyB-";
 
 const app = express();
 const PORT = 8000;
@@ -40,190 +40,181 @@ const getStorePathForUrl = (url) => {
 };
 
 // --- THE FINAL CRAWLER ENDPOINT ---
-app.post('/crawl-and-index', (req, res) => {
-    const { startUrl } = req.body;
-    if (!startUrl) return res.status(400).json({ error: 'startUrl is required' });
+app.post("/crawl-and-index", (req, res) => {
+  const { startUrl } = req.body;
+  if (!startUrl) return res.status(400).json({ error: "startUrl is required" });
 
-    const domain = new urlParse(startUrl).hostname;
-    const storePath = getStorePathForUrl(startUrl);
+  const domain = new urlParse(startUrl).hostname;
+  const storePath = getStorePathForUrl(startUrl);
 
-    if (fs.existsSync(storePath)) {
-        return res.json({ message: `Knowledge base for ${domain} already exists.` });
-    }
+  if (fs.existsSync(storePath)) {
+    return res.json({
+      message: `Knowledge base for ${domain} already exists.`,
+    });
+  }
 
-    const jobId = crypto.randomUUID();
-    crawlJobs[jobId] = { id: jobId, status: 'running', logs: [`Crawl started for ${domain}...`] };
-    res.status(202).json({ jobId });
+  const jobId = crypto.randomUUID();
+  crawlJobs[jobId] = {
+    id: jobId,
+    status: "running",
+    logs: [`Crawl started for ${domain}...`],
+  };
+  res.status(202).json({ jobId });
 
-    (async () => {
-        let browser;
-        try {
-          const queue = [startUrl];
-          const visited = new Set();
-          let vectorStore;
-          const embeddings = new GoogleGenerativeAIEmbeddings({
-            apiKey: GOOGLE_API_KEY,
-          });
+  (async () => {
+    let browser;
+    try {
+      const queue = [startUrl];
+      const visited = new Set();
+      let vectorStore;
+      const embeddings = new GoogleGenerativeAIEmbeddings({
+        apiKey: GOOGLE_API_KEY,
+      });
 
-          browser = await puppeteer.launch({
-            headless: "new",
-            protocolTimeout: 90000,
-          });
-          const page = await browser.newPage();
+      browser = await puppeteer.launch({
+        headless: "new",
+        protocolTimeout: 90000,
+      });
+      const page = await browser.newPage();
 
-          await page.setRequestInterception(true);
-          page.on("request", (req) => {
-            if (["image", "stylesheet", "font"].includes(req.resourceType())) {
-              req.abort();
-            } else {
-              req.continue();
-            }
-          });
-
-          while (queue.length > 0) {
-            const currentUrl = queue.shift();
-            if (visited.has(currentUrl)) continue;
-
-            visited.add(currentUrl);
-            crawlJobs[jobId].logs.push(
-              `(${visited.size}) Visiting: ${currentUrl}`
-            );
-
-            try {
-              await page.goto(currentUrl, {
-                waitUntil: "networkidle2",
-                timeout: 60000,
-              });
-
-              // This script runs inside the browser to act like a "data extractor".
-              const textContent = await page.evaluate(() => {
-                // It first checks if the page contains book listings ('article.product_pod').
-                const bookPods = Array.from(
-                  document.querySelectorAll("article.product_pod")
-                );
-                if (bookPods.length > 0) {
-                  // If it's a list page, extract structured data for each book
-                  return bookPods
-                    .map((pod) => {
-                      const title =
-                        pod.querySelector("h3 a")?.title || "No title";
-                      const price =
-                        pod.querySelector(".price_color")?.innerText ||
-                        "No price";
-                      const stock =
-                        pod
-                          .querySelector(".instock.availability")
-                          ?.innerText.trim() || "No stock info";
-                      // It intelligently reads the star rating from the CSS class name
-                      const ratingClass =
-                        pod.querySelector(".star-rating")?.className || "";
-                      const ratingMatch =
-                        ratingClass.match(/star-rating (\w+)/);
-                      const rating = ratingMatch
-                        ? `${ratingMatch[1]} stars`
-                        : "No rating";
-
-                      // It combines all the extracted data into a clean, readable sentence for the AI.
-                      return `Book Title: ${title}. Price: ${price}. Availability: ${stock}. Rating: ${rating}.`;
-                    })
-                    .join("\n\n");
-                } else {
-                  // If it's a detail page or another type of page, it falls back to grabbing the general text.
-                  const mainContent =
-                    document.querySelector("main, article, .content") ||
-                    document.body;
-                  // It also cleans up excessive whitespace to make the text cleaner for the AI.
-                  return mainContent.innerText.replace(/(\s\s)+/g, "\n");
-                }
-              });
-
-              // If we got meaningful content, we process it.
-              if (textContent && textContent.trim().length > 20) {
-                const splitter = new RecursiveCharacterTextSplitter({
-                  chunkSize: 1000,
-                  chunkOverlap: 100,
-                });
-                const docs = await splitter.createDocuments([textContent]);
-                if (docs.length > 0) {
-                  // If this is the first page, create a new vector store.
-                  if (!vectorStore) {
-                    vectorStore = await FaissStore.fromDocuments(
-                      docs,
-                      embeddings
-                    );
-                  } else {
-                    // For all subsequent pages, add their knowledge to the existing store.
-                    await vectorStore.addDocuments(docs);
-                  }
-                }
-              }
-
-              // Find all valid links on the current page, now with a rule to ignore category pages to prevent loops.
-              const links = await page.evaluate((baseDomain) => {
-                const allLinks = Array.from(document.querySelectorAll("a"));
-                const uniqueLinks = new Set();
-                const fileExtensions = [
-                  ".pdf",
-                  ".zip",
-                  ".tar.gz",
-                  ".png",
-                  ".jpg",
-                ];
-                allLinks.forEach((link) => {
-                  try {
-                    const cleanHref = link.href.split("#")[0];
-                    if (
-                      new URL(cleanHref).hostname === baseDomain &&
-                      !fileExtensions.some((ext) =>
-                        cleanHref.toLowerCase().endsWith(ext)
-                      ) &&
-                      !cleanHref.includes("/category/") // This is the new rule to avoid loops.
-                    ) {
-                      uniqueLinks.add(cleanHref);
-                    }
-                  } catch (e) {}
-                });
-                return Array.from(uniqueLinks);
-              }, domain);
-
-              crawlJobs[jobId].logs.push(
-                `---> Found ${links.length} new links. Queue size: ${queue.length}`
-              );
-
-              links.forEach((link) => {
-                if (!visited.has(link)) queue.push(link);
-              });
-            } catch (error) {
-              // If one page fails, we log the error and continue to the next page.
-              crawlJobs[jobId].logs.push(
-                `---> Failed to process ${currentUrl}: ${error.message}`
-              );
-            }
-          }
-
-          // After the crawl is finished, save the master knowledge file.
-          if (vectorStore) {
-            await vectorStore.save(storePath);
-            crawlJobs[jobId].status = "complete";
-            crawlJobs[jobId].logs.push(
-              `Crawl complete! Indexed ${visited.size} pages. Knowledge base is ready.`
-            );
-          } else {
-            throw new Error(
-              "Could not create a vector store. The website might be blocking scrapers."
-            );
-          }
-        } catch (error) {
-            console.error("[Crawler] A critical error occurred:", error);
-            crawlJobs[jobId].status = "error";
-            crawlJobs[jobId].logs.push(`Crawl failed: ${error.message}`);
-        } finally {
-          // Always close the browser to free up resources.
-          if (browser) await browser.close();
+      await page.setRequestInterception(true);
+      page.on("request", (req) => {
+        if (["image", "stylesheet", "font"].includes(req.resourceType())) {
+          req.abort();
+        } else {
+          req.continue();
         }
-    })();
-});
+      });
 
+      while (queue.length > 0) {
+        const currentUrl = queue.shift();
+        if (visited.has(currentUrl)) continue;
+
+        visited.add(currentUrl);
+        crawlJobs[jobId].logs.push(`(${visited.size}) Visiting: ${currentUrl}`);
+
+        try {
+          await page.goto(currentUrl, {
+            waitUntil: "networkidle2",
+            timeout: 60000,
+          });
+
+          // This script runs inside the browser to act like a "data extractor".
+          const textContent = await page.evaluate(() => {
+            // It first checks if the page contains book listings ('article.product_pod').
+            const bookPods = Array.from(
+              document.querySelectorAll("article.product_pod")
+            );
+            if (bookPods.length > 0) {
+              // If it's a list page, extract structured data for each book
+              return bookPods
+                .map((pod) => {
+                  const title = pod.querySelector("h3 a")?.title || "No title";
+                  const price =
+                    pod.querySelector(".price_color")?.innerText || "No price";
+                  const stock =
+                    pod
+                      .querySelector(".instock.availability")
+                      ?.innerText.trim() || "No stock info";
+                  // It intelligently reads the star rating from the CSS class name
+                  const ratingClass =
+                    pod.querySelector(".star-rating")?.className || "";
+                  const ratingMatch = ratingClass.match(/star-rating (\w+)/);
+                  const rating = ratingMatch
+                    ? `${ratingMatch[1]} stars`
+                    : "No rating";
+
+                  // It combines all the extracted data into a clean, readable sentence for the AI.
+                  return `Book Title: ${title}. Price: ${price}. Availability: ${stock}. Rating: ${rating}.`;
+                })
+                .join("\n\n");
+            } else {
+              // If it's a detail page or another type of page, it falls back to grabbing the general text.
+              const mainContent =
+                document.querySelector("main, article, .content") ||
+                document.body;
+              // It also cleans up excessive whitespace to make the text cleaner for the AI.
+              return mainContent.innerText.replace(/(\s\s)+/g, "\n");
+            }
+          });
+
+          // If we got meaningful content, we process it.
+          if (textContent && textContent.trim().length > 20) {
+            const splitter = new RecursiveCharacterTextSplitter({
+              chunkSize: 1000,
+              chunkOverlap: 100,
+            });
+            const docs = await splitter.createDocuments([textContent]);
+            if (docs.length > 0) {
+              // If this is the first page, create a new vector store.
+              if (!vectorStore) {
+                vectorStore = await FaissStore.fromDocuments(docs, embeddings);
+              } else {
+                // For all subsequent pages, add their knowledge to the existing store.
+                await vectorStore.addDocuments(docs);
+              }
+            }
+          }
+
+          // Find all valid links on the current page, now with a rule to ignore category pages to prevent loops.
+          const links = await page.evaluate((baseDomain) => {
+            const allLinks = Array.from(document.querySelectorAll("a"));
+            const uniqueLinks = new Set();
+            const fileExtensions = [".pdf", ".zip", ".tar.gz", ".png", ".jpg"];
+            allLinks.forEach((link) => {
+              try {
+                const cleanHref = link.href.split("#")[0];
+                if (
+                  new URL(cleanHref).hostname === baseDomain &&
+                  !fileExtensions.some((ext) =>
+                    cleanHref.toLowerCase().endsWith(ext)
+                  ) &&
+                  !cleanHref.includes("/category/") // This is the new rule to avoid loops.
+                ) {
+                  uniqueLinks.add(cleanHref);
+                }
+              } catch (e) {}
+            });
+            return Array.from(uniqueLinks);
+          }, domain);
+
+          crawlJobs[jobId].logs.push(
+            `---> Found ${links.length} new links. Queue size: ${queue.length}`
+          );
+
+          links.forEach((link) => {
+            if (!visited.has(link)) queue.push(link);
+          });
+        } catch (error) {
+          // If one page fails, we log the error and continue to the next page.
+          crawlJobs[jobId].logs.push(
+            `---> Failed to process ${currentUrl}: ${error.message}`
+          );
+        }
+      }
+
+      // After the crawl is finished, save the master knowledge file.
+      if (vectorStore) {
+        await vectorStore.save(storePath);
+        crawlJobs[jobId].status = "complete";
+        crawlJobs[jobId].logs.push(
+          `Crawl complete! Indexed ${visited.size} pages. Knowledge base is ready.`
+        );
+      } else {
+        throw new Error(
+          "Could not create a vector store. The website might be blocking scrapers."
+        );
+      }
+    } catch (error) {
+      console.error("[Crawler] A critical error occurred:", error);
+      crawlJobs[jobId].status = "error";
+      crawlJobs[jobId].logs.push(`Crawl failed: ${error.message}`);
+    } finally {
+      // Always close the browser to free up resources.
+      if (browser) await browser.close();
+    }
+  })();
+});
 
 // --- The Status Endpoint for Polling ---
 // The React app calls this endpoint every 2 seconds to get live updates.

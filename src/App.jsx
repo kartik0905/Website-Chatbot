@@ -89,7 +89,6 @@ export default function App() {
       }
     }, 2000);
 
-    
     // This cleanup function is CRITICAL. It runs when the component unmounts
     // to prevent memory leaks from the timer.
     return () => clearInterval(intervalId);
