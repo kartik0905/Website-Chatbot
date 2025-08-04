@@ -1,233 +1,297 @@
-const express = require("express");
-const cors = require("cors");
-const puppeteer = require("puppeteer");
-const fs = require("fs");
-const path = require("path");
-const urlParse = require("url-parse"); // Helper for easily handling and parsing URLs
-const crypto = require("crypto"); // Built-in Node.js module to generate unique IDs for our crawl jobs
+const express = require("express"); // The backbone of our server, handles API requests.
+const cors = require("cors"); // Middleware to allow our React frontend to talk to this server
+const puppeteer = require("puppeteer"); // The headless browser we use to crawl websites.
+const urlParse = require("url-parse"); // A small helper for easily handling and parsing URLs.
+const crypto = require("crypto"); // A built-in Node.js module to generate unique IDs for our crawl jobs.
+const PQueue = require("p-queue").default; // The task manager for making our crawler fast and concurrent.
 
-const { GoogleGenerativeAI } = require("@google/generative-ai"); // The official Google AI SDK for the final answering step
-const { RecursiveCharacterTextSplitter } = require("langchain/text_splitter"); // LangChain's tool for splitting text into chunks
-const { GoogleGenerativeAIEmbeddings } = require("@langchain/google-genai"); // LangChain's tool for creating vector embeddings
-const { FaissStore } = require("@langchain/community/vectorstores/faiss"); // LangChain's tool for our local vector database
+const { CohereClient } = require("cohere-ai"); // The official Cohere SDK for embeddings and chat.
 
-const GOOGLE_API_KEY = "AIzaSyB-";
+// Pinecone
+const { Pinecone } = require("@pinecone-database/pinecone"); // The official Pinecone SDK for our vector database.
 
+// LangChain tools (only for text splitting)
+const { RecursiveCharacterTextSplitter } = require("langchain/text_splitter"); // A LangChain helper to chunk text.
+
+// --- 🔑 API Keys ---
+const COHERE_API_KEY = "";
+const PINECONE_API_KEY =
+  "";
+
+// --- Constants & Client Initializations ---
+const PINECONE_INDEX_NAME = "";
 const app = express();
 const PORT = 8000;
-const genAI = new GoogleGenerativeAI(GOOGLE_API_KEY);
 
-// Set up middleware
-app.use(cors()); // Allows our React app to communicate with this server
-app.use(express.json()); // Allows the server to understand JSON data from the React app.
+// We create and configure the clients for our external services once, when the server starts.
+const pinecone = new Pinecone({ apiKey: PINECONE_API_KEY });
+const pineconeIndex = pinecone.index(PINECONE_INDEX_NAME);
+const cohere = new CohereClient({ token: COHERE_API_KEY });
 
-// --- In-Memory Job Store ---
-// This object acts as a simple, temporary database to keep track of the status and logs of active crawl jobs.
+// Standard server middleware
+app.use(cors());
+app.use(express.json());
+
+// A simple in-memory object to store the status of ongoing crawl jobs.
 const crawlJobs = {};
 
-// --- Vector Store Configuration ---
-// Defines the folder where all our saved "knowledge files" (vector stores) will be kept
-const vectorStorePath = path.join(__dirname, "vector_stores");
+// Helper function for getting Cohere embeddings
+async function getCohereEmbeddings(texts) {
+  const response = await cohere.embed({
+    texts,
+    model: "embed-english-v3.0",
+    inputType: "search_document", // Use 'search_document' for indexing
+  });
+  return response.embeddings;
+}
 
-// This function creates a unique and safe filename for each website's knowledge file based on its domain name
-const getStorePathForUrl = (url) => {
-  if (!fs.existsSync(vectorStorePath)) fs.mkdirSync(vectorStorePath);
-  const domain = new urlParse(url).hostname;
-  return path.join(
-    vectorStorePath,
-    `faiss_store_${domain.replace(/\./g, "_")}`
-  );
-};
-
-// --- THE FINAL CRAWLER ENDPOINT ---
-app.post("/crawl-and-index", (req, res) => {
+// --- CRAWLER ENDPOINT ---
+app.post("/crawl-and-index", async (req, res) => {
   const { startUrl } = req.body;
   if (!startUrl) return res.status(400).json({ error: "startUrl is required" });
 
   const domain = new urlParse(startUrl).hostname;
-  const storePath = getStorePathForUrl(startUrl);
+  const namespace = domain.replace(/[.-]/g, "_");
 
-  if (fs.existsSync(storePath)) {
-    return res.json({
-      message: `Knowledge base for ${domain} already exists.`,
-    });
-  }
+  try {
+    const stats = await pineconeIndex.describeIndexStats();
 
-  const jobId = crypto.randomUUID();
-  crawlJobs[jobId] = {
-    id: jobId,
-    status: "running",
-    logs: [`Crawl started for ${domain}...`],
-  };
-  res.status(202).json({ jobId });
-
-  (async () => {
-    let browser;
-    try {
-      const queue = [startUrl];
-      const visited = new Set();
-      let vectorStore;
-      const embeddings = new GoogleGenerativeAIEmbeddings({
-        apiKey: GOOGLE_API_KEY,
+    // Create a unique, safe "folder name" for this website's data inside our Pinecone index.
+    if (stats.namespaces?.[namespace]?.recordCount > 0) {
+      console.log(
+        `[Server] ✅ Knowledge base for ${domain} already exists. Skipping crawl.`
+      );
+      return res.json({
+        message: `Knowledge base for ${domain} already exists.`,
       });
+    }
 
-      browser = await puppeteer.launch({
-        headless: "new",
-        protocolTimeout: 90000,
-      });
-      const page = await browser.newPage();
+    // If not crawled, create a new job ID and send it back to the frontend.
+    const jobId = crypto.randomUUID();
+    crawlJobs[jobId] = {
+      id: jobId,
+      status: "running",
+      logs: [`Crawl started for ${domain}...`],
+    };
 
-      await page.setRequestInterception(true);
-      page.on("request", (req) => {
-        if (["image", "stylesheet", "font"].includes(req.resourceType())) {
-          req.abort();
-        } else {
-          req.continue();
-        }
-      });
+    res.status(202).json({ jobId });
 
-      while (queue.length > 0) {
-        const currentUrl = queue.shift();
-        if (visited.has(currentUrl)) continue;
+    // This immediately-invoked async function runs the long crawl process in the background.
+    (async () => {
+      let browser;
+      try {
+        const visited = new Set();
+        let allDocs = []; // We will collect all text chunks here.
+        const queue = new PQueue({ concurrency: 2 }); // Our "Traffic Controller" for concurrency.
+        const CRAWL_PAGE_LIMIT = 200;
 
-        visited.add(currentUrl);
-        crawlJobs[jobId].logs.push(`(${visited.size}) Visiting: ${currentUrl}`);
+        browser = await puppeteer.launch({
+          headless: "new",
+          args: ["--no-sandbox", "--disable-setuid-sandbox"], // Good for server environments
+        });
 
-        try {
-          await page.goto(currentUrl, {
-            waitUntil: "networkidle2",
-            timeout: 60000,
-          });
+        // This is the core "worker" function for crawling a single page.
+        const crawlPage = async (url) => {
+          if (visited.has(url) || visited.size >= CRAWL_PAGE_LIMIT) {
+            if (visited.size >= CRAWL_PAGE_LIMIT) queue.clear();
+            return;
+          }
+          visited.add(url);
+          crawlJobs[jobId].logs.push(
+            `(${visited.size}/${CRAWL_PAGE_LIMIT}) Crawling: ${url}`
+          );
 
-          // This script runs inside the browser to act like a "data extractor".
-          const textContent = await page.evaluate(() => {
-            // It first checks if the page contains book listings ('article.product_pod').
-            const bookPods = Array.from(
-              document.querySelectorAll("article.product_pod")
+          let page;
+          try {
+            page = await browser.newPage();
+
+            await page.setUserAgent(
+              "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
             );
-            if (bookPods.length > 0) {
-              // If it's a list page, extract structured data for each book
-              return bookPods
-                .map((pod) => {
-                  const title = pod.querySelector("h3 a")?.title || "No title";
-                  const price =
-                    pod.querySelector(".price_color")?.innerText || "No price";
-                  const stock =
-                    pod
-                      .querySelector(".instock.availability")
-                      ?.innerText.trim() || "No stock info";
-                  // It intelligently reads the star rating from the CSS class name
-                  const ratingClass =
-                    pod.querySelector(".star-rating")?.className || "";
-                  const ratingMatch = ratingClass.match(/star-rating (\w+)/);
-                  const rating = ratingMatch
-                    ? `${ratingMatch[1]} stars`
-                    : "No rating";
 
-                  // It combines all the extracted data into a clean, readable sentence for the AI.
-                  return `Book Title: ${title}. Price: ${price}. Availability: ${stock}. Rating: ${rating}.`;
-                })
-                .join("\n\n");
-            } else {
-              // If it's a detail page or another type of page, it falls back to grabbing the general text.
-              const mainContent =
-                document.querySelector("main, article, .content") ||
-                document.body;
-              // It also cleans up excessive whitespace to make the text cleaner for the AI.
-              return mainContent.innerText.replace(/(\s\s)+/g, "\n");
-            }
-          });
-
-          // If we got meaningful content, we process it.
-          if (textContent && textContent.trim().length > 20) {
-            const splitter = new RecursiveCharacterTextSplitter({
-              chunkSize: 1000,
-              chunkOverlap: 100,
+            // Make our scraper look more like a real user.
+            await page.setRequestInterception(true);
+            page.on("request", (req) => {
+              if (
+                ["image", "stylesheet", "font", "media"].includes(
+                  req.resourceType()
+                )
+              )
+                req.abort();
+              else req.continue();
             });
-            const docs = await splitter.createDocuments([textContent]);
-            if (docs.length > 0) {
-              // If this is the first page, create a new vector store.
-              if (!vectorStore) {
-                vectorStore = await FaissStore.fromDocuments(docs, embeddings);
-              } else {
-                // For all subsequent pages, add their knowledge to the existing store.
-                await vectorStore.addDocuments(docs);
-              }
+
+            await page.goto(url, {
+              waitUntil: "domcontentloaded",
+              timeout: 60000,
+            });
+
+            // Intelligently wait for the page's main content to be visible.
+            await page.waitForSelector("body", { timeout: 15000 });
+
+            // Extract all visible text from the page.
+            const textContent = await page.evaluate(() =>
+              document.body.innerText.replace(/(\s\s)+/g, "\n")
+            );
+            const textLength = textContent ? textContent.trim().length : 0;
+            console.log(`\n---------------------------------`);
+            console.log(`[Page Report] URL: ${url}`);
+            console.log(`---> Extracted Text Length: ${textLength}`);
+
+            if (textLength > 50) {
+              // Use LangChain to split the text into smaller, more useful chunks.
+              console.log(`---> ✅ SUCCESS: Content is valid.`);
+              const splitter = new RecursiveCharacterTextSplitter({
+                chunkSize: 1000,
+                chunkOverlap: 100,
+              });
+              const docs = await splitter.createDocuments([textContent]);
+              allDocs.push(...docs);
+            }
+
+            // Find all valid, on-site links to add to the crawl queue.
+            const links = await page.evaluate((baseDomain) => {
+              const anchors = Array.from(document.querySelectorAll("a"));
+              const validLinks = new Set();
+              anchors.forEach((a) => {
+                try {
+                  const href = a.href.split("#")[0];
+                  if (new URL(href).hostname === baseDomain)
+                    validLinks.add(href);
+                } catch {}
+              });
+              return Array.from(validLinks);
+            }, domain);
+
+            links.forEach((link) => {
+              if (!visited.has(link)) queue.add(() => crawlPage(link));
+            });
+          } catch (error) {
+            crawlJobs[jobId].logs.push(
+              `---> Failed to process ${url}: ${error.message}`
+            );
+            console.error(`---> [Error] Failed on page ${url}:`, error.message);
+          } finally {
+            if (page) await page.close(); // Important: close the page to free up memory.
+          }
+        };
+
+        queue.add(() => crawlPage(startUrl)); // Seed the queue with the first page.
+        await queue.onIdle(); // Wait for the entire crawl to finish.
+
+        if (allDocs.length > 0) {
+          crawlJobs[jobId].logs.push(
+            `Found ${allDocs.length} text chunks. Creating embeddings...`
+          );
+          const textsToEmbed = allDocs.map((doc) => doc.pageContent);
+
+          // This is your custom, advanced logic to handle API rate limits by batching and throttling.
+          const estimateTokens = (text) => Math.ceil(text.length / 4); // Rough estimate
+          const BATCH_SIZE = 90;
+          const TOKEN_LIMIT_PER_MINUTE = 100000;
+
+          let tokenCountThisMinute = 0;
+          let batchStartTime = Date.now();
+
+          for (let i = 0; i < textsToEmbed.length; i += BATCH_SIZE) {
+            const batchTexts = textsToEmbed.slice(i, i + BATCH_SIZE);
+            const estimatedTokens = batchTexts.reduce(
+              (acc, text) => acc + estimateTokens(text),
+              0
+            );
+
+            // ⏱️ Throttle if needed
+            if (
+              tokenCountThisMinute + estimatedTokens >
+              TOKEN_LIMIT_PER_MINUTE
+            ) {
+              const elapsed = Date.now() - batchStartTime;
+              const waitTime = Math.max(0, 60000 - elapsed);
+              console.log(
+                `[Throttle] ⏳ Waiting ${waitTime / 1000}s due to rate limit...`
+              );
+              await new Promise((resolve) => setTimeout(resolve, waitTime));
+              tokenCountThisMinute = 0;
+              batchStartTime = Date.now();
+            }
+
+            try {
+              console.log(
+                `[Embedding] Batch ${i / BATCH_SIZE + 1} of ${Math.ceil(
+                  textsToEmbed.length / BATCH_SIZE
+                )}`
+              );
+
+              const embeddings = await getCohereEmbeddings(batchTexts);
+              tokenCountThisMinute += estimatedTokens;
+
+              // Prepare vectors with metadata, including the original text.
+              const vectors = embeddings.map((values, idx) => ({
+                id: crypto.randomUUID(),
+                values,
+                metadata: { text: batchTexts[idx] },
+              }));
+
+              // Upload the batch of vectors to our Pinecone Memory Palace.
+              await pineconeIndex.namespace(namespace).upsert(vectors);
+              crawlJobs[jobId].logs.push(
+                `✅ Embedded & upserted ${vectors.length} chunks.`
+              );
+
+              console.log(
+                `[Tokens] Batch: ~${estimatedTokens}, Total this minute: ${tokenCountThisMinute}`
+              );
+            } catch (err) {
+              console.error(
+                `[Embedding Error] Batch ${i / BATCH_SIZE + 1}:`,
+                err.message
+              );
+              crawlJobs[jobId].logs.push(
+                `❌ Failed batch ${i / BATCH_SIZE + 1}: ${err.message}`
+              );
             }
           }
-
-          // Find all valid links on the current page, now with a rule to ignore category pages to prevent loops.
-          const links = await page.evaluate((baseDomain) => {
-            const allLinks = Array.from(document.querySelectorAll("a"));
-            const uniqueLinks = new Set();
-            const fileExtensions = [".pdf", ".zip", ".tar.gz", ".png", ".jpg"];
-            allLinks.forEach((link) => {
-              try {
-                const cleanHref = link.href.split("#")[0];
-                if (
-                  new URL(cleanHref).hostname === baseDomain &&
-                  !fileExtensions.some((ext) =>
-                    cleanHref.toLowerCase().endsWith(ext)
-                  ) &&
-                  !cleanHref.includes("/category/") // This is the new rule to avoid loops.
-                ) {
-                  uniqueLinks.add(cleanHref);
-                }
-              } catch (e) {}
-            });
-            return Array.from(uniqueLinks);
-          }, domain);
-
           crawlJobs[jobId].logs.push(
-            `---> Found ${links.length} new links. Queue size: ${queue.length}`
+            `Uploading ${vectors.length} vectors to Pinecone...`
           );
+          for (let i = 0; i < vectors.length; i += 100) {
+            const batch = vectors.slice(i, i + 100);
+            await pineconeIndex.namespace(namespace).upsert(batch);
+          }
 
-          links.forEach((link) => {
-            if (!visited.has(link)) queue.push(link);
-          });
-        } catch (error) {
-          // If one page fails, we log the error and continue to the next page.
+          crawlJobs[jobId].status = "complete";
           crawlJobs[jobId].logs.push(
-            `---> Failed to process ${currentUrl}: ${error.message}`
+            `✅ Crawl complete. Indexed ${visited.size} pages.`
           );
+        } else {
+          throw new Error("No valid content to index.");
         }
+      } catch (err) {
+        console.error("[Crawler] Error:", err);
+        if (crawlJobs[jobId]) {
+          crawlJobs[jobId].status = "error";
+          crawlJobs[jobId].logs.push(`❌ Crawl failed: ${err.message}`);
+        }
+      } finally {
+        if (browser) await browser.close();
       }
-
-      // After the crawl is finished, save the master knowledge file.
-      if (vectorStore) {
-        await vectorStore.save(storePath);
-        crawlJobs[jobId].status = "complete";
-        crawlJobs[jobId].logs.push(
-          `Crawl complete! Indexed ${visited.size} pages. Knowledge base is ready.`
-        );
-      } else {
-        throw new Error(
-          "Could not create a vector store. The website might be blocking scrapers."
-        );
-      }
-    } catch (error) {
-      console.error("[Crawler] A critical error occurred:", error);
-      crawlJobs[jobId].status = "error";
-      crawlJobs[jobId].logs.push(`Crawl failed: ${error.message}`);
-    } finally {
-      // Always close the browser to free up resources.
-      if (browser) await browser.close();
-    }
-  })();
+    })();
+  } catch (e) {
+    console.error("[Server] Pinecone error:", e);
+    res.status(500).json({ error: "Failed to access Pinecone index." });
+  }
 });
 
-// --- The Status Endpoint for Polling ---
-// The React app calls this endpoint every 2 seconds to get live updates.
+
+// The frontend calls this every few seconds to get live updates on the crawl.
 app.get("/crawl-status/:jobId", (req, res) => {
-  const { jobId } = req.params;
-  const job = crawlJobs[jobId];
-  if (!job) {
-    return res.status(404).json({ error: "Job not found." });
-  }
+  const job = crawlJobs[req.params.jobId];
+  if (!job) return res.status(404).json({ error: "Job not found." });
   res.json(job);
 });
 
-// --- The Final Answering Endpoint ---
+
+// This is the "Query Phase". It uses the knowledge base to answer questions.
 app.post("/ask-crawler", async (req, res) => {
   const { question, baseUrl } = req.body;
   if (!question || !baseUrl)
@@ -235,46 +299,55 @@ app.post("/ask-crawler", async (req, res) => {
       .status(400)
       .json({ error: "Question and baseUrl are required." });
 
-  const storePath = getStorePathForUrl(baseUrl);
-  if (!fs.existsSync(storePath)) {
-    return res
-      .status(404)
-      .json({ error: "No knowledge base found for this website." });
-  }
+  const namespace = new urlParse(baseUrl).hostname.replace(/\./g, "_");
 
   try {
-    // Load the correct knowledge file from the disk.
-    const embeddings = new GoogleGenerativeAIEmbeddings({
-      apiKey: GOOGLE_API_KEY,
+    const vectorStore = await pineconeIndex.namespace(namespace);
+
+    // 1. Turn the user's question into a vector using the Cohere Alchemist.
+    const queryEmbeddingResponse = await cohere.embed({
+      texts: [question],
+      model: "embed-english-v3.0",
+      inputType: "search_query", // Optimized for finding relevant documents.
     });
-    const loadedVectorStore = await FaissStore.load(storePath, embeddings);
+    const queryEmbedding = queryEmbeddingResponse.embeddings[0];
 
-    // Create the retriever tool for semantic search.
-    const retriever = loadedVectorStore.asRetriever();
-
-    // Find the most relevant text chunks from the entire website.
-    const relevantDocs = await retriever.getRelevantDocuments(question);
-    const context = relevantDocs.map((doc) => doc.pageContent).join("\n\n");
-
-    // Build the prompt with the precise context for the AI.
-    const prompt = `Based only on the following context from the website, answer the question. If you don't know the answer, just say that you don't know.\n\nCONTEXT: """${context}"""\n\nQUESTION: ${question}`;
-
-    // Get the final answer from the Gemini model.
-    const model = genAI.getGenerativeModel({
-      model: "gemini-1.5-flash-latest",
+    // 2. Use the question vector to query the Pinecone Memory Palace.
+    // This finds the most relevant text chunks from the website.
+    const queryResponse = await vectorStore.query({
+      topK: 5,
+      vector: queryEmbedding,
+      includeMetadata: true,
     });
-    const result = await model.generateContent(prompt);
-    const response = await result.response;
-    const answer = response.text();
 
-    res.json({ answer });
+    if (!queryResponse.matches || queryResponse.matches.length === 0) {
+      return res.json({
+        answer: "I couldn't find any relevant information on that website.",
+      });
+    }
+
+    // 3. Build the context from the text we stored in the metadata
+    const context = queryResponse.matches
+      .map((match) => match.metadata?.text || "")
+      .join("\n\n---\n\n");
+
+    // 4. Build the final message for the chat model
+    const message = `CONTEXT:\n${context}\n\nBased ONLY on the context above, answer the following question:\n\nQUESTION: ${question}`;
+
+    // 5. Send the final prompt to the Cohere Sage to generate a human-like answer.
+    const response = await cohere.chat({
+      model: "command-r",
+      message: message,
+    });
+
+    // The answer from the chat method is in a different property
+    res.json({ answer: response.text });
   } catch (error) {
     console.error("[Server] Query failed:", error);
     res.status(500).json({ error: "Failed to get an answer." });
   }
 });
 
-// Start the server
 app.listen(PORT, () => {
-  console.log(`Server is running on http://localhost:${PORT}`);
+  console.log(`🚀 Server running at http://localhost:${PORT}`);
 });
