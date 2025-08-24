@@ -2,7 +2,7 @@
 <div align="center">
 
 # 🤖 AI Web Crawler & Chatbot  
-### Transform any website into an intelligent, conversational knowledge base
+### Transform any website or document into an intelligent, conversational knowledge base
 
 </div>
 
@@ -11,37 +11,40 @@
   <img src="https://img.shields.io/badge/Node.js-339933?style=for-the-badge&logo=nodedotjs&logoColor=white" alt="Node.js"/>
   <img src="https://img.shields.io/badge/LangChain-1E90FF?style=for-the-badge&logo=langchain&logoColor=white" alt="LangChain"/>
   <img src="https://img.shields.io/badge/Puppeteer-40B5A4?style=for-the-badge&logo=puppeteer&logoColor=white" alt="Puppeteer"/>
-  <img src="https://img.shields.io/badge/Cohere-111111?style=for-the-badge&logo=cohere&logoColor=white" alt="Cohere"/>
+  <img src="https://img.shields.io/badge/OpenAI-412991?style=for-the-badge&logo=openai&logoColor=white" alt="OpenAI"/>
+  <img src="https://img.shields.io/badge/Pinecone-1E1E1E?style=for-the-badge&logo=pinecone&logoColor=white" alt="Pinecone"/>
 </p>
 
 ---
 
 ## 📌 Overview
 
-This full-stack AI application transforms any website into an intelligent, searchable, and chat-capable knowledge base using a powerful combination of:
+This full-stack AI application transforms any **website, PDF, or DOCX** into an intelligent, searchable, and chat-capable knowledge base using a powerful combination of:
 
-- Autonomous web crawling
-- Persistent vector-based knowledge storage
-- Retrieval-Augmented Generation (RAG)
-- Semantic search
-- Natural language answering via Cohere's LLM
+- 🌐 Autonomous unlimited web crawling  
+- 📄 Document ingestion (PDF & DOCX)  
+- 💾 Persistent vector-based knowledge storage  
+- 🔍 Retrieval-Augmented Generation (RAG)  
+- 🧠 Semantic search  
+- 🤖 Natural language answering via OpenAI's embedding + LLM  
 
 ---
 
 ## 🚀 The Vision
 
-Create more than just a chatbot. This project gives you a private AI that **fully understands any website** you point it at — no repeated scraping, no shallow Q&A. Just one deep crawl = permanent expert-level knowledge.
+Go beyond a chatbot. This project gives you a **private AI that deeply understands any website or document** you point it at — no repeated scraping, no shallow Q&A. Just one deep crawl = permanent expert-level knowledge.
 
 ---
 
 ## ✨ Features
 
-- 🧠 **Autonomous Crawler** — Input a single URL, and the bot navigates the entire site.
-- 💾 **One-Time Crawl, Permanent Memory** — Stores embeddings in Pinecone for future queries.
-- 📊 **Live Crawler Logs** — Watch the bot explore and learn in real-time.
-- 🔍 **Semantic Search** — Vector-based search that understands meaning, not just keywords.
-- 🧹 **Smart Scraping** — Puppeteer handles modern sites and ignores unnecessary assets.
-- 🤖 **AI Answers by Cohere** — Answers grounded in context-rich embeddings from your target site.
+- 🧠 **Autonomous Crawler** — Input a single URL, and the bot navigates the entire site.  
+- 📄 **File Support** — Upload **PDFs & DOCX** and query them seamlessly.  
+- 💾 **One-Time Crawl, Permanent Memory** — Stores embeddings in Pinecone for future queries.  
+- 📊 **Live Crawler Logs** — Watch the bot explore and learn in real-time.  
+- 🔍 **Semantic Search** — Vector-based search that understands meaning, not just keywords.  
+- 🧹 **Smart Scraping** — Puppeteer handles modern sites and ignores unnecessary assets.  
+- 🤖 **AI Answers by OpenAI** — Answers grounded in context-rich embeddings from your target source.  
 
 ---
 
@@ -54,7 +57,7 @@ Create more than just a chatbot. This project gives you a private AI that **full
 | **Crawler** | Puppeteer | Headless browser scraping |
 | **AI Orchestration** | LangChain | Text chunking & embedding pipeline |
 | **Vector DB** | Pinecone | Embedding-based knowledge retrieval |
-| **LLM** | Cohere | Embedding + Answer generation |
+| **LLM + Embeddings** | OpenAI (small embedding model) | Embedding + Answer generation |
 
 ---
 
@@ -62,17 +65,18 @@ Create more than just a chatbot. This project gives you a private AI that **full
 
 ### Phase 1: Crawl & Index
 
-1. **Start Job**: You input a `startUrl`, server generates a `jobId`.
-2. **Live Updates**: Frontend polls crawler logs every 2s.
-3. **Crawling & Scraping**: Puppeteer discovers and scrapes all pages.
-4. **Vectorizing**: LangChain splits and Cohere embeds the content.
-5. **Saving**: All vectors are saved into Pinecone vector DB.
+1. **Start Job**: You input a `startUrl`, server generates a `jobId`.  
+2. **Live Updates**: Frontend polls crawler logs every 2s.  
+3. **Crawling & Scraping**: Puppeteer discovers and scrapes all pages.  
+4. **Vectorizing**: LangChain splits and OpenAI embeds the content.  
+5. **Saving**: All vectors are saved into Pinecone vector DB.  
+6. **Optional Docs**: Upload PDFs or DOCX files, automatically vectorized.  
 
 ### Phase 2: Query Time
 
-1. **Load Knowledge**: Pinecone vector DB is queried.
-2. **Semantic Search**: Retrieves top-matching chunks.
-3. **AI Response**: Cohere crafts a natural answer using the context.
+1. **Load Knowledge**: Pinecone vector DB is queried.  
+2. **Semantic Search**: Retrieves top-matching chunks.  
+3. **AI Response**: OpenAI crafts a natural answer using the context.  
 
 ---
 
@@ -80,9 +84,9 @@ Create more than just a chatbot. This project gives you a private AI that **full
 
 ### 🔧 Requirements
 
-- Node.js (v18+)
-- Cohere API Key
-- Pinecone API Key
+- Node.js (v18+)  
+- OpenAI API Key  
+- Pinecone API Key  
 
 ---
 
@@ -108,7 +112,7 @@ Create a `.env` file in the `server/` folder:
 
 ```
 # server/.env
-COHERE_API_KEY=your_cohere_key
+OPENAI_API_KEY=your_openai_key
 PINECONE_API_KEY=your_pinecone_key
 ```
 
@@ -117,7 +121,7 @@ In `server.js`:
 ```js
 require("dotenv").config();
 
-const COHERE_API_KEY = process.env.COHERE_API_KEY;
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const PINECONE_API_KEY = process.env.PINECONE_API_KEY;
 ```
 
@@ -161,13 +165,13 @@ Website-Chatbot/
 
 ## 🙌 Acknowledgments
 
-- [LangChain](https://www.langchain.com/)
-- [Cohere](https://cohere.com/)
-- [Puppeteer](https://pptr.dev/)
-- [Pinecone](https://www.pinecone.io/)
+- [LangChain](https://www.langchain.com/)  
+- [OpenAI](https://openai.com/)  
+- [Puppeteer](https://pptr.dev/)  
+- [Pinecone](https://www.pinecone.io/)  
 
 ---
 
 <div align="center">
-  Built with ❤️ by [Kartik Garg](https://github.com/kartik0905)
+  Built with ❤️ by <a href="https://github.com/kartik0905">Kartik Garg</a>
 </div>
